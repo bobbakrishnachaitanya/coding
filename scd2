@@ -1,0 +1,69 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, lit, current_timestamp
+
+# Step 1: Set up Spark session
+spark = SparkSession.builder \
+    .appName("SCD2 Delta Hive") \
+    .getOrCreate()
+
+# Assuming you have loaded data from the Delta Hive table into the DataFrame hive_table_df
+# You can use the following line to load data into DataFrame (replace "delta_hive_table_path" with your table path)
+# hive_table_df = spark.read.format("delta").load("delta_hive_table_path")
+
+# Step 2: Load new delta data into DataFrame
+# Assuming you have loaded data into the DataFrame delta_data_df
+# You can use the following line to load data into DataFrame (replace "delta_data_path" with your delta data path)
+# delta_data_df = spark.read.format("delta").load("delta_data_path")
+
+# Step 3: Perform SCD2 logic in Spark DataFrame
+# Identify new records and set appropriate values for control fields
+new_records_df = delta_data_df.alias("new") \
+    .join(hive_table_df.alias("old"), "primary_key", "left_outer") \
+    .where(col("old.primary_key").isNull()) \
+    .select(
+        col("new.primary_key"),
+        col("new.attribute1"),
+        col("new.attribute2"),
+        lit(True).alias("is_current"),
+        lit(False).alias("is_deleted"),
+        current_timestamp().alias("start_date"),
+        lit("9999-12-31 00:00:00").alias("end_date")
+    )
+
+# Identify updated records and mark the old records as deleted
+updated_records_df = delta_data_df.alias("new") \
+    .join(hive_table_df.alias("old"), "primary_key") \
+    .where(
+        (col("old.attribute1") != col("new.attribute1")) |
+        (col("old.attribute2") != col("new.attribute2"))
+    ) \
+    .select(
+        col("old.primary_key"),
+        col("old.attribute1"),
+        col("old.attribute2"),
+        lit(False).alias("is_current"),
+        lit(True).alias("is_deleted"),
+        col("old.start_date"),
+        current_timestamp().alias("end_date")
+    )
+
+# Union new and updated records
+combined_df = new_records_df.union(updated_records_df)
+
+# Mark the old records in the Hive table as not current and set end_date
+old_records_df = hive_table_df \
+    .filter(col("is_current") == True) \
+    .withColumn("is_current", lit(False)) \
+    .withColumn("end_date", current_timestamp())
+
+# Combine all records (new, updated, and old)
+final_df = combined_df.union(old_records_df)
+
+# Step 4: Write the updated DataFrame back to the Delta Hive table
+final_df.write \
+    .format("delta") \
+    .mode("overwrite") \
+    .save("delta_hive_table_path")  # Replace with your Delta Hive table path
+
+# Stop the Spark session
+spark.stop()
